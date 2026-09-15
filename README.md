@@ -40,18 +40,18 @@ The morphology representation includes area, centroid, covariance, elongation, s
 ## Methodological Concept
 
 ```text
-Multimodal MRI
-      │
-      ▼
-    MBNSS
-      │
-      ▼
-     ASE
-      │
-      ▼
-Initial Structural State
-      │
-      ▼
+      Multimodal MRI
+            │
+            ▼
+          MBNSS
+            │
+            ▼
+           ASE
+            │
+            ▼
+      Initial Structural State
+            │
+            ▼
  ┌─────────────────────────────┐
  │ Recurrent Refinement Stage  │
  │                             │
