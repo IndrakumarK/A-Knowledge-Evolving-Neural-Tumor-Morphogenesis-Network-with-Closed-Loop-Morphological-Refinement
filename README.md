@@ -14,8 +14,6 @@ KE-NTMN uses a closed-loop structural refinement mechanism in which an intermedi
 
 The framework investigates morphology-conditioned recurrent refinement for tumor localization, boundary delineation, and structural consistency in multimodal brain MRI segmentation.
 
-> **Important:** This public repository is a research-oriented implementation/scaffold aligned with the manuscript methodology. It should not be interpreted as a bit-for-bit reproduction of every experimental implementation, result, or manuscript equation unless the corresponding components are explicitly implemented and verified.
-
 ---
 
 ## Key Components
@@ -97,12 +95,11 @@ KE-NTMN/
 ├── requirements.txt
 ├── configs/
 │   └── default.yaml
-├── data/
-│   ├── train/
-│   ├── val/
-│   └── test/
+├── train.py
+├── evaluate.py
 ├── src/
 │   └── ketmn/
+        ├──__init__
 │       ├── data.py
 │       ├── losses.py
 │       ├── model.py
@@ -114,8 +111,6 @@ KE-NTMN/
 │   └── evaluate.sh
 ├── tests/
 │   └── test_smoke.py
-├── checkpoints/
-├── results/
 └── docs/
     ├── DATA.md
     └── REPRODUCIBILITY.md
@@ -125,13 +120,20 @@ Datasets, medical images, model checkpoints, and experiment outputs are excluded
 
 ---
 
+## Datasets
+
+- **UPENN-GBM:** https://www.cancerimagingarchive.net/collection/upenn-gbm/
+- **TCGA-GBM:** https://www.cancerimagingarchive.net/collection/tcga-gbm/
+- **MOTUM:** https://doi.gin.g-node.org/10.12751/g-node.tvzqc5/
+  
+---
 ## Installation
 
 ### 1. Clone the repository
 
 ```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
-cd KE-NTMN
+git clone https://github.com/IndrakumarK/A-Knowledge-Evolving-Neural-Tumor-Morphogenesis-Network-with-Closed-Loop-Morphological-Refinement.git
+cd A-Knowledge-Evolving-Neural-Tumor-Morphogenesis-Network-with-Closed-Loop-Morphological-Refinement
 ```
 
 ### 2. Create a virtual environment
@@ -336,13 +338,9 @@ If you use this repository or the KE-NTMN methodology in academic work, please c
 @article{KE_NTMN_2026,
   title   = {KE-NTMN: A Knowledge-Evolving Neural Tumor Morphogenesis Network with Closed-Loop Morphological Refinement for Multimodal Brain Tumor Segmentation},
   year    = {2026},
-  note    = {Manuscript associated with this repository}
+  note    = {}
 }
 ```
-
-Replace the placeholder bibliographic fields with the final published citation after publication.
-
----
 
 ## License
 
