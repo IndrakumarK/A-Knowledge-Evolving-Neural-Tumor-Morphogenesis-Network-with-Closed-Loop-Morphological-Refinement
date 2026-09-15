@@ -1,0 +1,147 @@
+# KE-NTMN Default Configuration
+
+project:
+  name: "KE-NTMN"
+  task: "multimodal_brain_tumor_segmentation"
+  seed: 42
+  device: "cuda"
+
+data:
+  root: "data"
+
+  modalities:
+    - T1
+    - T1ce
+    - T2
+    - FLAIR
+
+  num_classes: 4
+  image_size: [256, 256]
+  dimension: "2D"
+
+  normalize: "zscore_per_modality"
+
+  augmentation:
+    enabled: true
+    horizontal_flip: true
+    vertical_flip: true
+    rotation: true
+    scaling: true
+
+model:
+  name: "KE-NTMN"
+
+  input_channels: 4
+  num_classes: 4
+
+  feature_channels:
+    stage1: 64
+    stage2: 128
+    stage3: 256
+
+  structural_feature_dim: 256
+
+  recurrent:
+    type: "ConvGRU"
+    steps: 3
+
+  morphology:
+    enabled: true
+
+    descriptors:
+      - area
+      - centroid
+      - covariance
+      - elongation
+      - soft_boundary
+      - soft_compactness
+
+  knowledge_feedback:
+    enabled: true
+    type: "residual_structural_correction"
+
+  topology:
+    enabled: true
+    method: "soft_euler_characteristic"
+    connectivity: 8
+
+  connectivity:
+    enabled: true
+    method: "local_soft_adjacency"
+
+  uncertainty:
+    enabled: true
+    method: "normalized_predictive_entropy"
+
+  decoder:
+    channels:
+      - 256
+      - 128
+      - 4
+
+training:
+  epochs: 150
+  batch_size: 8
+
+  optimizer:
+    name: "AdamW"
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+
+  scheduler:
+    name: "CosineAnnealingLR"
+    min_learning_rate: 0.000001
+
+  initialization:
+    method: "Xavier"
+
+  precision: "FP32"
+
+loss:
+  foreground_dice: 1.00
+  structural_stability: 0.20
+  morphology_estimation: 0.20
+  knowledge_consistency: 0.20
+  topology: 0.10
+  connectivity: 0.10
+  smoothness: 0.05
+  uncertainty_consistency: 0.05
+
+  mbnss:
+    dice: 1.00
+    boundary_position: 0.50
+    boundary_normal: 0.25
+    morphology: 0.25
+
+evaluation:
+  metrics:
+    - Dice
+    - IoU
+    - HD95
+    - sensitivity
+    - specificity
+
+  patient_level: true
+
+  statistical_analysis:
+    enabled: true
+    test: "Wilcoxon_signed_rank"
+    alpha: 0.05
+    correction: "Holm"
+    bootstrap_resamples: 10000
+    confidence_interval: 0.95
+
+reproducibility:
+  random_seed: 42
+  deterministic: true
+
+logging:
+  enabled: true
+  log_dir: "results/logs"
+  save_checkpoints: true
+  checkpoint_dir: "checkpoints"
+
+output:
+  results_dir: "results"
+  figures_dir: "figures"
+  predictions_dir: "results/predictions"
