@@ -6,6 +6,9 @@ project:
   seed: 42
   device: "cuda"
 
+# ---------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------
 data:
   root: "data"
 
@@ -15,19 +18,48 @@ data:
     - T2
     - FLAIR
 
+  input_channels: 4
   num_classes: 4
   image_size: [256, 256]
   dimension: "2D"
 
   normalize: "zscore_per_modality"
 
+  # Patient-level partitioning:
+  # UPenn-GBM: 70/15/15
+  # TCGA-GBM: 70/15/15
+  # MOTUM: 70/15/15
+  split:
+    strategy: "patient_level"
+    train: 0.70
+    validation: 0.15
+    test: 0.15
+
   augmentation:
     enabled: true
     horizontal_flip: true
     vertical_flip: true
-    rotation: true
-    scaling: true
 
+    rotation:
+      enabled: true
+      type: "small_angle"
+      degrees: 10
+
+    scaling:
+      enabled: true
+      min: 0.90
+      max: 1.10
+
+  # Dataset-specific supervised classes.
+   valid_classes:
+    UPenn-GBM: [true, true, true, true]
+    TCGA-GBM: [true, true, true, true]
+    MOTUM: [true, true, false, true]
+
+
+# ---------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------
 model:
   name: "KE-NTMN"
 
@@ -48,6 +80,7 @@ model:
   morphology:
     enabled: true
 
+    # Six morphology descriptors defined in the manuscript.
     descriptors:
       - area
       - centroid
@@ -55,6 +88,10 @@ model:
       - elongation
       - soft_boundary
       - soft_compactness
+
+    descriptor_normalization:
+      enabled: true
+      statistics: "training_set_only"
 
   knowledge_feedback:
     enabled: true
@@ -68,17 +105,21 @@ model:
   connectivity:
     enabled: true
     method: "local_soft_adjacency"
+    connectivity: 8
 
   uncertainty:
     enabled: true
     method: "normalized_predictive_entropy"
+    auxiliary_prediction: true
 
   decoder:
     channels:
       - 256
       - 128
       - 4
-
+# ---------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------
 training:
   epochs: 150
   batch_size: 8
@@ -97,7 +138,12 @@ training:
 
   precision: "FP32"
 
+# ---------------------------------------------------------------------
+# Loss functions
+# ---------------------------------------------------------------------
 loss:
+
+  # Main KE-NTMN segmentation objective
   foreground_dice: 1.00
   structural_stability: 0.20
   morphology_estimation: 0.20
@@ -107,21 +153,30 @@ loss:
   smoothness: 0.05
   uncertainty_consistency: 0.05
 
+  # MBNSS objective
   mbnss:
     dice: 1.00
     boundary_position: 0.50
     boundary_normal: 0.25
     morphology: 0.25
 
+# ---------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------
 evaluation:
+
   metrics:
     - Dice
     - IoU
     - HD95
+    - precision
+    - recall
     - sensitivity
     - specificity
 
   patient_level: true
+
+    exclude_unavailable_classes: true
 
   statistical_analysis:
     enabled: true
@@ -131,16 +186,28 @@ evaluation:
     bootstrap_resamples: 10000
     confidence_interval: 0.95
 
+
+# ---------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------
 reproducibility:
   random_seed: 42
   deterministic: true
 
+
+# ---------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------
 logging:
   enabled: true
   log_dir: "results/logs"
   save_checkpoints: true
   checkpoint_dir: "checkpoints"
 
+
+# ---------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------
 output:
   results_dir: "results"
   figures_dir: "figures"
