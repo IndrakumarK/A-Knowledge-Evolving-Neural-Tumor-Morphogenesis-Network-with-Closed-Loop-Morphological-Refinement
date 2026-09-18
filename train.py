@@ -20,10 +20,20 @@ from src.ketmn.losses import (
 )
 from src.ketmn.model import KE_NTMN
 from src.ketmn.morphology import morphology
-from src.ketmn.uncertainty import entropy
+
+DATASET_VALID_CLASSES = {
+    "UPenn": [True, True, True, True],
+    "UPenn-GBM": [True, True, True, True],
+    "TCGA": [True, True, True, True],
+    "TCGA-GBM": [True, True, True, True],
+    "MOTUM": [True, True, False, True],
+}
 
 
-def set_seed(seed):
+# ---------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------
+def set_seed(seed, deterministic=True):
     """Set random seeds for reproducible experiments."""
 
     random.seed(seed)
@@ -34,30 +44,161 @@ def set_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
 
-def evaluate(model, loader, device, num_classes):
-    """Evaluate mean patient-level foreground Dice."""
+# ---------------------------------------------------------------------
+# Valid-class handling
+# ---------------------------------------------------------------------
+def get_valid_classes(batch, dataset_name, num_classes):
+       if "valid_classes" in batch:
 
+        valid_classes = batch["valid_classes"]
+
+        if torch.is_tensor(valid_classes):
+            valid_classes = (
+                valid_classes.cpu().numpy()
+            )
+
+        valid_classes = np.asarray(
+            valid_classes
+        )
+
+        if valid_classes.ndim > 1:
+            valid_classes = valid_classes[0]
+
+        valid_classes = valid_classes.astype(
+            bool
+        )
+
+    elif dataset_name in DATASET_VALID_CLASSES:
+
+        valid_classes = np.asarray(
+            DATASET_VALID_CLASSES[
+                dataset_name
+            ],
+            dtype=bool,
+        )
+
+    else:
+
+        valid_classes = np.ones(
+            num_classes,
+            dtype=bool,
+        )
+
+    if len(valid_classes) != num_classes:
+        raise ValueError(
+            f"Expected {num_classes} valid-class flags, "
+            f"but received {len(valid_classes)}."
+        )
+
+    return valid_classes
+
+
+def valid_classes_to_tensor(
+    valid_classes,
+    device,
+):
+    """Convert valid-class flags to a tensor."""
+
+    return torch.as_tensor(
+        valid_classes,
+        dtype=torch.bool,
+        device=device,
+    )
+
+# ---------------------------------------------------------------------
+# Dataset name
+# ---------------------------------------------------------------------
+def get_dataset_name(batch, default=None):
+    """Obtain dataset name from the batch."""
+
+    if "dataset" in batch:
+
+        dataset_name = batch["dataset"]
+
+        if isinstance(
+            dataset_name,
+            (list, tuple),
+        ):
+            return str(dataset_name[0])
+
+        return str(dataset_name)
+
+    if default is not None:
+        return str(default)
+
+    return None
+
+
+# ---------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------
+def evaluate(
+    model,
+    loader,
+    device,
+    num_classes,
+):
     model.eval()
+
     scores = []
 
     with torch.no_grad():
+
         for batch in loader:
-            images = batch["image"].to(device)
-            target = batch["mask"].to(device)
 
-            output = model(images)
+            images = batch["image"].to(
+                device,
+                non_blocking=True,
+            )
 
-            prediction = output["prob"].argmax(dim=1)
+            target = batch["mask"].to(
+                device,
+                non_blocking=True,
+            )
+
+            dataset_name = get_dataset_name(
+                batch
+            )
+
+            valid_classes = get_valid_classes(
+                batch,
+                dataset_name,
+                num_classes,
+            )
+
+            prediction = (
+                model(images)["prob"]
+                .argmax(dim=1)
+            )
 
             class_scores = []
 
-            for class_id in range(1, num_classes):
-                pred_class = prediction == class_id
-                target_class = target == class_id
+            for class_id in range(
+                1,
+                num_classes,
+            ):
+
+                # -----------------------------------------------------
+                # Skip unavailable classes
+                # -----------------------------------------------------
+                if not valid_classes[class_id]:
+                    continue
+
+                pred_class = (
+                    prediction == class_id
+                )
+
+                target_class = (
+                    target == class_id
+                )
 
                 denominator = (
                     pred_class.sum()
@@ -65,48 +206,65 @@ def evaluate(model, loader, device, num_classes):
                 )
 
                 if denominator == 0:
+
                     score = torch.tensor(
                         1.0,
                         device=device,
                     )
+
                 else:
+
                     intersection = (
-                        pred_class & target_class
+                        pred_class
+                        & target_class
                     ).sum()
 
                     score = (
-                        2.0 * intersection.float()
+                        2.0
+                        * intersection.float()
                         / denominator.float()
                     )
 
                 class_scores.append(score)
 
-            scores.append(
-                torch.stack(class_scores).mean().item()
-            )
+            if class_scores:
 
-    return float(np.mean(scores)) if scores else 0.0
+                scores.append(
+                    torch.stack(
+                        class_scores
+                    ).mean().item()
+                )
 
+    if not scores:
+        return 0.0
 
-def compute_loss(output, target):
-    """
-    Compute the manuscript-aligned composite training objective.
+    return float(
+        np.mean(scores)
+    )
 
-    The repository implementation uses the available differentiable
-    structural signals returned by KE-NTMN.
-    """
-
+# ---------------------------------------------------------------------
+# Composite loss
+# ---------------------------------------------------------------------
+def compute_loss(
+    output,
+    target,
+    valid_classes,
+    loss_config,
+):
+   
     prob = output["prob"]
+    logits = output["logits"]
+
     states = output["states"]
-    morphology_pred = output["morphology"]
 
     # -------------------------------------------------------------
     # Foreground Dice
     # -------------------------------------------------------------
     dice = dice_loss(
-        output["logits"],
+        logits,
         target,
         num_classes=prob.shape[1],
+        valid_classes=valid_classes,
     )
 
     # -------------------------------------------------------------
@@ -115,6 +273,7 @@ def compute_loss(output, target):
     stability_terms = []
 
     for i in range(1, len(states)):
+
         stability_terms.append(
             structural_stability_loss(
                 states[i],
@@ -123,11 +282,16 @@ def compute_loss(output, target):
         )
 
     if stability_terms:
+
         stability = torch.stack(
             stability_terms
         ).mean()
+
     else:
-        stability = prob.new_tensor(0.0)
+
+        stability = prob.new_tensor(
+            0.0
+        )
 
     # -------------------------------------------------------------
     # Morphological supervision
@@ -142,69 +306,137 @@ def compute_loss(output, target):
         foreground_target
     )
 
-    morphology_loss_value = morphology_estimation_loss(
-        morphology_pred,
-        target_morphology.detach(),
+    morphology_pred = output[
+        "morphology"
+    ]
+
+    morphology_loss_value = (
+        morphology_estimation_loss(
+            morphology_pred,
+            target_morphology.detach(),
+        )
+    )
+
+   if (
+        "expected_morphology"
+        not in output
+    ):
+        raise KeyError(
+            "KE_NTMN output must contain "
+            "'expected_morphology'."
+        )
+
+    expected_morphology = output[
+        "expected_morphology"
+    ]
+
+    knowledge_loss = (
+        knowledge_consistency_loss(
+            morphology_pred,
+            expected_morphology,
+        )
     )
 
     # -------------------------------------------------------------
-    # Knowledge consistency
-    # -------------------------------------------------------------
-    expected_morphology = (
-        output["morphology"]
-        .detach()
-    )
-
-    knowledge_loss = knowledge_consistency_loss(
-        morphology_pred,
-        expected_morphology,
-    )
-
-    # -------------------------------------------------------------
-    # Topology and connectivity
+    # Topology
     # -------------------------------------------------------------
     topology = topology_loss(
         prob,
         target,
+        valid_classes=valid_classes,
     )
 
+    # -------------------------------------------------------------
+    # Connectivity
+    # -------------------------------------------------------------
     connectivity = connectivity_loss(
         prob,
+        target=target,
+        valid_classes=valid_classes,
     )
 
     # -------------------------------------------------------------
     # Spatial smoothness
     # -------------------------------------------------------------
     smoothness = smoothness_loss(
-        output["logits"]
+        logits
+    )
+
+    uncertainty_logits = output.get(
+        "auxiliary_logits",
+        logits,
+    )
+
+    uncertainty = (
+        uncertainty_consistency_loss(
+            uncertainty_logits,
+            target,
+            valid_classes=valid_classes,
+        )
     )
 
     # -------------------------------------------------------------
-    # Uncertainty consistency
-    # -------------------------------------------------------------
-    uncertainty = uncertainty_consistency_loss(
-        output["logits"],
-        target,
-    )
-
-    # -------------------------------------------------------------
-    # Composite objective
+    # Manuscript loss weights
     # -------------------------------------------------------------
     total = (
-        1.00 * dice
-        + 0.20 * stability
-        + 0.20 * morphology_loss_value
-        + 0.20 * knowledge_loss
-        + 0.10 * topology
-        + 0.10 * connectivity
-        + 0.05 * smoothness
-        + 0.05 * uncertainty
+
+        loss_config.get(
+            "foreground_dice",
+            1.00,
+        )
+        * dice
+
+        + loss_config.get(
+            "structural_stability",
+            0.20,
+        )
+        * stability
+
+        + loss_config.get(
+            "morphology_estimation",
+            0.20,
+        )
+        * morphology_loss_value
+
+        + loss_config.get(
+            "knowledge_consistency",
+            0.20,
+        )
+        * knowledge_loss
+
+        + loss_config.get(
+            "topology",
+            0.10,
+        )
+        * topology
+
+        + loss_config.get(
+            "connectivity",
+            0.10,
+        )
+        * connectivity
+
+        + loss_config.get(
+            "smoothness",
+            0.05,
+        )
+        * smoothness
+
+        + loss_config.get(
+            "uncertainty_consistency",
+            0.05,
+        )
+        * uncertainty
     )
 
     return total
 
 
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 def main():
+
     parser = argparse.ArgumentParser(
         description="Train KE-NTMN."
     )
@@ -217,48 +449,96 @@ def main():
 
     args = parser.parse_args()
 
-    # -------------------------------------------------------------
+    # =============================================================
     # Configuration
-    # -------------------------------------------------------------
-    config_path = Path(args.config)
+    # =============================================================
+    config_path = Path(
+        args.config
+    )
 
     if not config_path.exists():
         raise FileNotFoundError(
-            f"Configuration file not found: {config_path}"
+            f"Configuration file not found: "
+            f"{config_path}"
         )
 
-    with config_path.open("r", encoding="utf-8") as file:
+    with config_path.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+
         config = yaml.safe_load(file)
 
-    seed = config.get(
+    # =============================================================
+    # Reproducibility
+    # =============================================================
+    reproducibility_config = config.get(
         "reproducibility",
         {},
-    ).get(
+    )
+
+    seed = reproducibility_config.get(
         "random_seed",
-        config.get("seed", 42),
+        config.get(
+            "project",
+            {},
+        ).get(
+            "seed",
+            42,
+        ),
     )
 
-    set_seed(seed)
+    deterministic = reproducibility_config.get(
+        "deterministic",
+        True,
+    )
 
-    # -------------------------------------------------------------
+    set_seed(
+        seed,
+        deterministic=deterministic,
+    )
+
+    print(
+        f"Random seed: {seed}"
+    )
+
+    # =============================================================
     # Device
-    # -------------------------------------------------------------
-    device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
+    # =============================================================
+    configured_device = config.get(
+        "project",
+        {},
+    ).get(
+        "device",
+        "cuda",
     )
 
-    print(f"Using device: {device}")
-
-    if torch.cuda.is_available():
-        print(
-            f"GPU: {torch.cuda.get_device_name(0)}"
+    if (
+        configured_device == "cuda"
+        and torch.cuda.is_available()
+    ):
+        device = torch.device(
+            "cuda"
+        )
+    else:
+        device = torch.device(
+            "cpu"
         )
 
-    # -------------------------------------------------------------
+    print(
+        f"Using device: {device}"
+    )
+
+    if device.type == "cuda":
+
+        print(
+            f"GPU: "
+            f"{torch.cuda.get_device_name(0)}"
+        )
+
+    # =============================================================
     # Data configuration
-    # -------------------------------------------------------------
+    # =============================================================
     data_config = config["data"]
 
     data_root = Path(
@@ -275,14 +555,16 @@ def main():
         )
     )
 
-    num_classes = data_config.get(
-        "num_classes",
-        4,
+    num_classes = int(
+        data_config.get(
+            "num_classes",
+            4,
+        )
     )
 
-    # -------------------------------------------------------------
+    # =============================================================
     # Datasets
-    # -------------------------------------------------------------
+    # =============================================================
     train_dataset = BrainTumorDataset(
         root=data_root / "train",
         image_size=image_size,
@@ -303,15 +585,28 @@ def main():
         augment=False,
     )
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config["training"].get(
+    # =============================================================
+    # Data loaders
+    # =============================================================
+    training_config = config[
+        "training"
+    ]
+
+    batch_size = int(
+        training_config.get(
             "batch_size",
             8,
-        ),
+        )
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=0,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=(
+            device.type == "cuda"
+        ),
     )
 
     val_loader = DataLoader(
@@ -319,47 +614,95 @@ def main():
         batch_size=1,
         shuffle=False,
         num_workers=0,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=(
+            device.type == "cuda"
+        ),
     )
 
     print(
-        f"Training cases: {len(train_dataset)}"
-    )
-    print(
-        f"Validation cases: {len(val_dataset)}"
+        f"Training cases: "
+        f"{len(train_dataset)}"
     )
 
-    # -------------------------------------------------------------
+    print(
+        f"Validation cases: "
+        f"{len(val_dataset)}"
+    )
+
+    # =============================================================
     # Model
-    # -------------------------------------------------------------
-    model_config = config["model"]
+    # =============================================================
+    model_config = config[
+        "model"
+    ]
+
+    recurrent_config = model_config.get(
+        "recurrent",
+        {},
+    )
+
+    recurrent_steps = recurrent_config.get(
+        "steps",
+        3,
+    )
+
+    structural_dim = model_config.get(
+        "structural_feature_dim",
+        256,
+    )
 
     model = KE_NTMN(
-        num_classes=model_config.get(
-            "num_classes",
-            4,
-        ),
-        steps=model_config.get(
-            "steps",
-            model_config.get(
-                "recurrent_steps",
-                3,
-            ),
-        ),
-        structural_dim=model_config.get(
-            "structural_feature_dim",
-            model_config.get(
-                "structural_dim",
-                256,
-            ),
-        ),
+        num_classes=num_classes,
+        steps=recurrent_steps,
+        structural_dim=structural_dim,
     ).to(device)
 
-    # -------------------------------------------------------------
+    # =============================================================
+    # Xavier initialization
+    # =============================================================
+    initialization_method = (
+        training_config.get(
+            "initialization",
+            {},
+        ).get(
+            "method",
+            "Xavier",
+        )
+    )
+
+    if (
+        initialization_method.lower()
+        == "xavier"
+    ):
+
+        for module in model.modules():
+
+            if isinstance(
+                module,
+                (
+                    nn.Conv2d,
+                    nn.Linear,
+                ),
+            ):
+
+                nn.init.xavier_uniform_(
+                    module.weight
+                )
+
+                if module.bias is not None:
+
+                    nn.init.zeros_(
+                        module.bias
+                    )
+
+    # =============================================================
     # Optimizer
-    # -------------------------------------------------------------
-    training_config = config["training"]
-    optimizer_config = training_config["optimizer"]
+    # =============================================================
+    optimizer_config = (
+        training_config[
+            "optimizer"
+        ]
+    )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -373,34 +716,52 @@ def main():
         ),
     )
 
-    # -------------------------------------------------------------
-    # Learning-rate scheduler
-    # -------------------------------------------------------------
-    scheduler_config = training_config.get(
-        "scheduler",
+    # =============================================================
+    # Scheduler
+    # =============================================================
+    scheduler_config = (
+        training_config.get(
+            "scheduler",
+            {},
+        )
+    )
+
+    epochs = int(
+        training_config.get(
+            "epochs",
+            150,
+        )
+    )
+
+    scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=epochs,
+            eta_min=scheduler_config.get(
+                "min_learning_rate",
+                1e-6,
+            ),
+        )
+    )
+
+    # =============================================================
+    # Loss configuration
+    # =============================================================
+    loss_config = config.get(
+        "loss",
         {},
     )
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=training_config.get(
-            "epochs",
-            150,
-        ),
-        eta_min=scheduler_config.get(
-            "min_learning_rate",
-            1e-6,
-        ),
+    # =============================================================
+    # Checkpoint directory
+    # =============================================================
+    logging_config = config.get(
+        "logging",
+        {},
     )
 
-    # -------------------------------------------------------------
-    # Checkpoint directory
-    # -------------------------------------------------------------
     checkpoint_dir = Path(
-        config.get(
-            "logging",
-            {},
-        ).get(
+        logging_config.get(
             "checkpoint_dir",
             "checkpoints",
         )
@@ -411,17 +772,17 @@ def main():
         exist_ok=True,
     )
 
-    # -------------------------------------------------------------
-    # Training loop
-    # -------------------------------------------------------------
-    epochs = training_config.get(
-        "epochs",
-        150,
+    # =============================================================
+    # Training
+    # =============================================================
+    best_val_dice = -float(
+        "inf"
     )
 
-    best_val_dice = -float("inf")
-
-    for epoch in range(1, epochs + 1):
+    for epoch in range(
+        1,
+        epochs + 1,
+    ):
 
         model.train()
 
@@ -429,15 +790,60 @@ def main():
 
         for batch in train_loader:
 
-            images = batch["image"].to(
+            images = batch[
+                "image"
+            ].to(
                 device,
                 non_blocking=True,
             )
 
-            target = batch["mask"].to(
+            target = batch[
+                "mask"
+            ].to(
                 device,
                 non_blocking=True,
             )
+
+            dataset_name = get_dataset_name(
+                batch
+            )
+
+            valid_classes = (
+                get_valid_classes(
+                    batch,
+                    dataset_name,
+                    num_classes,
+                )
+            )
+
+            valid_classes_tensor = (
+                valid_classes_to_tensor(
+                    valid_classes,
+                    device,
+                )
+            )
+
+            # -----------------------------------------------------
+            # For MOTUM, the unavailable ED label must not occur
+            # in the supervised target.
+            # -----------------------------------------------------
+            if not valid_classes[2]:
+
+                invalid_ed = (
+                    target == 2
+                )
+
+                if invalid_ed.any():
+
+                    raise ValueError(
+                        "MOTUM target contains "
+                        "the unavailable edema "
+                        "class (label 2). "
+                        "The preprocessing/label "
+                        "harmonization step must "
+                        "exclude this class rather "
+                        "than encode it as background."
+                    )
 
             optimizer.zero_grad(
                 set_to_none=True
@@ -451,18 +857,34 @@ def main():
             loss = compute_loss(
                 output,
                 target,
+                valid_classes_tensor,
+                loss_config,
             )
+
+            if not torch.isfinite(loss):
+
+                raise FloatingPointError(
+                    f"Non-finite loss detected "
+                    f"at epoch {epoch}: "
+                    f"{loss.item()}"
+                )
 
             loss.backward()
 
             optimizer.step()
 
-            running_loss += loss.item()
+            running_loss += (
+                loss.item()
+            )
 
         scheduler.step()
 
         train_loss = (
-            running_loss / len(train_loader)
+            running_loss
+            / max(
+                len(train_loader),
+                1,
+            )
         )
 
         val_dice = evaluate(
@@ -472,23 +894,28 @@ def main():
             num_classes,
         )
 
-        current_lr = optimizer.param_groups[0][
-            "lr"
-        ]
+        current_lr = (
+            optimizer.param_groups[0][
+                "lr"
+            ]
+        )
 
         print(
-            f"Epoch {epoch:03d}/{epochs:03d} | "
+            f"Epoch "
+            f"{epoch:03d}/{epochs:03d} | "
             f"Loss: {train_loss:.4f} | "
             f"Val Dice: {val_dice:.4f} | "
             f"LR: {current_lr:.2e}"
         )
 
-        # ---------------------------------------------------------
-        # Save best validation checkpoint
-        # ---------------------------------------------------------
+        # =========================================================
+        # Save best checkpoint
+        # =========================================================
         if val_dice > best_val_dice:
 
-            best_val_dice = val_dice
+            best_val_dice = (
+                val_dice
+            )
 
             checkpoint = {
                 "epoch": epoch,
@@ -500,17 +927,25 @@ def main():
                 "config": config,
             }
 
+            checkpoint_path = (
+                checkpoint_dir
+                / "best.pt"
+            )
+
             torch.save(
                 checkpoint,
-                checkpoint_dir / "best.pt",
+                checkpoint_path,
             )
 
             print(
                 f"Saved best checkpoint: "
-                f"{checkpoint_dir / 'best.pt'}"
+                f"{checkpoint_path}"
             )
 
-    print("\nTraining complete.")
+    print(
+        "\nTraining complete."
+    )
+
     print(
         f"Best validation Dice: "
         f"{best_val_dice:.4f}"
