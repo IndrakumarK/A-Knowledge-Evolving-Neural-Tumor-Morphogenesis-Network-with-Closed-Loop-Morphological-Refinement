@@ -1,7 +1,9 @@
 import torch
-
+# ---------------------------------------------------------------------
+# Normalized predictive entropy
+# ---------------------------------------------------------------------
 def entropy(prob, eps=1e-8):
-   
+    
     if prob.ndim != 4:
         raise ValueError(
             "prob must have shape [B, C, H, W], "
@@ -15,25 +17,62 @@ def entropy(prob, eps=1e-8):
             "prob must contain at least two classes."
         )
 
-    p = prob.clamp_min(eps)
+    # Prevent log(0).
+    p = prob.clamp(
+        min=eps,
+        max=1.0,
+    )
 
+    # -------------------------------------------------------------
+    # Predictive entropy
+    # -------------------------------------------------------------
     entropy_map = -(
         p * torch.log(p)
-    ).sum(dim=1)
+    ).sum(
+        dim=1
+    )
 
+    # -------------------------------------------------------------
+    # Normalize entropy to approximately [0, 1].
+    # Maximum entropy = log(C).
+    # -------------------------------------------------------------
     normalization = torch.log(
         torch.tensor(
             float(num_classes),
             device=prob.device,
             dtype=prob.dtype,
         )
+    ).clamp_min(eps)
+
+    normalized_entropy = (
+        entropy_map
+        / normalization
     )
 
-    return entropy_map / normalization
+    return normalized_entropy
 
-
-def consistency(prob, target):
+# ---------------------------------------------------------------------
+# Normalized predictive entropy alias
+# ---------------------------------------------------------------------
+def normalized_predictive_entropy(
+    prob,
+    eps=1e-8,
+):
    
+    return entropy(
+        prob,
+        eps=eps,
+    )
+
+# ---------------------------------------------------------------------
+# Uncertainty-error consistency
+# ---------------------------------------------------------------------
+def consistency(
+    prob,
+    target,
+    eps=1e-8,
+):
+
     if prob.ndim != 4:
         raise ValueError(
             "prob must have shape [B, C, H, W]."
@@ -44,14 +83,73 @@ def consistency(prob, target):
             "target must have shape [B, H, W]."
         )
 
-    prediction = prob.argmax(dim=1)
+    if (
+        prob.shape[0] != target.shape[0]
+        or prob.shape[2] != target.shape[1]
+        or prob.shape[3] != target.shape[2]
+    ):
+        raise ValueError(
+            "Probability and target spatial dimensions "
+            "do not match."
+        )
 
+    num_classes = prob.shape[1]
+
+    # -------------------------------------------------------------
+    # Ground-truth labels must be valid class indices.
+    # -------------------------------------------------------------
+    if target.min() < 0 or target.max() >= num_classes:
+        raise ValueError(
+            "Target contains class indices outside "
+            f"[0, {num_classes - 1}]."
+        )
+
+    # -------------------------------------------------------------
+    # Normalized predictive entropy
+    # -------------------------------------------------------------
+    uncertainty = entropy(
+        prob,
+        eps=eps,
+    )
+
+    # -------------------------------------------------------------
+    # Probability assigned to the ground-truth class
+    # -------------------------------------------------------------
+    target_probability = (
+        prob.gather(
+            dim=1,
+            index=target.unsqueeze(1),
+        )
+        .squeeze(1)
+    )
+
+    # -------------------------------------------------------------
+    # Soft local prediction error
+    # -------------------------------------------------------------
     error = (
-        prediction != target
-    ).float()
+        1.0
+        - target_probability
+    )
 
-    uncertainty = entropy(prob)
-
+    # -------------------------------------------------------------
+    # Uncertainty-error consistency
+    # -------------------------------------------------------------
     return (
-        uncertainty - error
+        uncertainty
+        - error
     ).abs().mean()
+
+# ---------------------------------------------------------------------
+# Public uncertainty-consistency alias
+# ---------------------------------------------------------------------
+def uncertainty_consistency(
+    prob,
+    target,
+    eps=1e-8,
+):
+    
+    return consistency(
+        prob,
+        target,
+        eps=eps,
+    )
